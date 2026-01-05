@@ -8,14 +8,13 @@ class Item(Base):
     __tablename__ = "items"
 
     id = Column(Integer, primary_key=True, index=True)
-    # 👇 On utilise BigInteger car les IDs Vinted sont très longs
     vinted_id = Column(BigInteger, unique=True, index=True) 
     title = Column(String)
     price = Column(Float)
     brand = Column(String)
     size = Column(String)
     url = Column(String)
-    photo_url = Column(String) # Ajouté pour stocker l'image
+    photo_url = Column(String)
     is_analyzed = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
