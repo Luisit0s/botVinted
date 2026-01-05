@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+playwright
+sqlalchemy
+pydantic
+pydantic-settings
+python-dotenv
+loguru
+requests
+aiofiles
