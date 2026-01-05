@@ -3,20 +3,29 @@ from sqlalchemy.orm import sessionmaker
 from app.core.config import settings
 from app.db.models import Base
 
-# Création du moteur
-engine = create_async_engine(settings.DATABASE_URL, echo=True)
+# Création du moteur asynchrone
+engine = create_async_engine(
+    settings.DATABASE_URL, 
+    echo=False,  # Mets à True pour voir les requêtes SQL dans la console
+    future=True
+)
 
-# Création de l'usine à sessions
+# Usine à sessions
 AsyncSessionLocal = sessionmaker(
-    engine, class_=AsyncSession, expire_on_commit=False
+    engine, 
+    class_=AsyncSession, 
+    expire_on_commit=False
 )
 
 async def init_db():
-    """Crée les tables si elles n'existent pas"""
+    """Crée les tables si elles n'existent pas."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-# Dépendance pour avoir la DB dans les routes
 async def get_db():
+    """Dépendance pour injecter la session DB dans les routes."""
     async with AsyncSessionLocal() as session:
-        yield session
+        try:
+            yield session
+        finally:
+            await session.close()
