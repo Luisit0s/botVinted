@@ -2,9 +2,10 @@ fastapi
 uvicorn[standard]
 playwright
 sqlalchemy
+aiosqlite
 pydantic
 pydantic-settings
 python-dotenv
 loguru
-requests
-aiofiles
+httpx
+apscheduler
