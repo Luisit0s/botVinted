@@ -31,10 +31,10 @@ class VintedAgent:
 
     async def get_real_details(self, item_url: str) -> dict:
         """
-        🕵️‍♂️ Va chercher les VRAIES infos sur la page article :
-        - Vraie date de publication (ex: "il y a 10 min")
-        - Vrais avis vendeur (ex: "5.0 (150)")
+        🕵️‍♂️ Récupération sécurisée des détails de l'article.
+        Amélioration : Gestion des erreurs et logs clairs.
         """
+        # Création d'une page avec un timeout global
         page = await self.browser.new_page()
         details = {
             "time": "Inconnu", 
@@ -43,43 +43,36 @@ class VintedAgent:
         }
         
         try:
-            await page.goto(item_url, timeout=15000)
+            # Augmentation légère du timeout pour plus de stabilité
+            logger.info(f"🔍 Analyse des détails : {item_url}")
+            await page.goto(item_url, timeout=20000, wait_until="domcontentloaded")
             
-            # 1. RÉCUPÉRATION DATE (Timestamp)
-            # On cherche le texte "il y a" ou une date dans les attributs
-            try:
-                # Cherche la balise de temps relative souvent présente
-                time_element = page.locator("div[data-testid='item-attributes-upload_date'] time")
-                if await time_element.count() > 0:
-                    details["time"] = await time_element.inner_text()
-                else:
-                    # Fallback : on cherche dans le texte global
-                    body_text = await page.inner_text("body")
-                    match_time = re.search(r'(il y a [0-9]+ (min|heure|jour|seconde)s?)', body_text)
-                    if match_time:
-                        details["time"] = match_time.group(1)
-            except: pass
+            # 1. RÉCUPÉRATION DATE
+            time_element = page.locator("div[data-testid='item-attributes-upload_date'] time")
+            if await time_element.count() > 0:
+                details["time"] = await time_element.inner_text()
+            else:
+                # Fallback avec regex sur le body
+                body_text = await page.content()
+                match_time = re.search(r'(il y a [0-9]+ (min|heure|jour|seconde)s?)', body_text)
+                if match_time:
+                    details["time"] = match_time.group(1)
 
             # 2. RÉCUPÉRATION AVIS VENDEUR
-            try:
-                # On cherche le lien vers le profil qui contient le score
-                user_block = page.locator("div[data-testid='item-source-summary']")
-                if await user_block.count() > 0:
-                    text = await user_block.inner_text()
-                    # On cherche le format (123)
-                    match_count = re.search(r'\((\d+)\)', text)
-                    if match_count:
-                        details["review_count"] = match_count.group(1)
-                        # Si on a un nombre d'avis, on assume 5 étoiles visuelles ou on cherche le chiffre
-                        details["rating"] = "⭐⭐⭐⭐⭐" 
-                        if "4." in text: details["rating"] = "⭐⭐⭐⭐"
-                    elif "Aucune évaluation" in text:
-                        details["rating"] = "Nouveau"
-            except: pass
-
-        except Exception:
-            pass
+            user_block = page.locator("div[data-testid='item-source-summary']")
+            if await user_block.count() > 0:
+                text = await user_block.inner_text()
+                match_count = re.search(r'\((\d+)\)', text)
+                if match_count:
+                    details["review_count"] = match_count.group(1)
+                    details["rating"] = "⭐⭐⭐⭐⭐" if "4." not in text else "⭐⭐⭐⭐"
+                elif "Aucune évaluation" in text:
+                    details["rating"] = "Nouveau"
+                    
+        except Exception as e:
+            logger.error(f"⚠️ Erreur lors du scan des détails : {e}")
         finally:
+            # On s'assure de toujours fermer la page pour éviter les fuites de RAM
             await page.close()
             
         return details
@@ -99,7 +92,6 @@ class VintedAgent:
     async def search(self, keyword: str, max_price: float):
         if not self.page: await self.start()
         clean_keyword = keyword.replace(" ", "+")
-        # Filtre tailles HOMME standard
         size_filter = "&size_ids[]=208&size_ids[]=209&size_ids[]=210&size_ids[]=211&size_ids[]=212"
         url = f"https://www.vinted.fr/catalog?search_text={clean_keyword}&price_to={max_price}&currency=EUR&order=newest_first{size_filter}"
         
@@ -115,7 +107,6 @@ class VintedAgent:
         items_locators = await self.page.locator("div[data-testid='grid-item']").all()
         results = []
         
-        # On ne prend que les 5 premiers pour aller vite car on va ouvrir chaque page
         for item in items_locators[:5]: 
             try:
                 link = item.locator("a").first
