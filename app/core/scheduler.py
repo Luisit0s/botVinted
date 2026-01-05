@@ -12,10 +12,9 @@ from app.db.models import Item
 from app.ml.pricing import calculate_profit 
 
 # ==========================================
-# 🎯 TES CIBLES (PRIX MAX D'ACHAT)
+# 🎯 TES CIBLES (LISTE COMPLÈTE)
 # ==========================================
 TARGETS = [
-    # Si c'est du Corteiz en dessous de 60€, on prend.
     {"keyword": "Corteiz", "max_buy_price": 60, "webhook": "https://discord.com/api/webhooks/1446121642844749884/EHfuqbN0-DA88tOMGzZkOeCzDLn-Bfsc98DFj9wRfrQ2on9sYkd66t3kvXCSt4zyN8wU"},
     {"keyword": "Stussy", "max_buy_price": 50, "webhook": "https://discord.com/api/webhooks/1446121862470832169/g2Yzxxzmakm0LR5gMBHCWSFgsVNNzNQKCETLZTIUwF7xYqPeAq_pCX5pl3mQAAjzThlu"},
     {"keyword": "Supreme", "max_buy_price": 50, "webhook": "https://discord.com/api/webhooks/1446122085276586095/BzZttmy4185HfFbGTt7tJMw1ypglG3UVbGr84mjIsBfhqUN3cw3fRPVPi1xivjdkKlh3"},
@@ -37,8 +36,6 @@ TARGETS = [
 # 🛑 FILTRES DE SÉCURITÉ
 # ==========================================
 CONDITIONS_ACCEPTEES = ["neuf", "neuf avec étiquette", "neuf sans étiquette", "très bon état", "bon état"]
-
-# Liste des mots-clés "poubelle" (Concours, Fake, Recherche)
 BLACKLIST_KEYWORDS = [
     "je recherche", "je cherche", "recherche", "fausse", "faux", "fake", "contrefaçon", 
     "concours", "gagner", "tirage", "sort", "participation", "insta", "instagram", 
@@ -49,100 +46,91 @@ agent = VintedAgent()
 scheduler = AsyncIOScheduler()
 
 async def job_cleanup_db():
-    logger.info("🧹 Nettoyage DB...")
+    """🧹 Supprime les anciens articles pour garder une DB légère."""
+    logger.info("🧹 Nettoyage DB (Articles > 48h)...")
     cutoff_date = datetime.utcnow() - timedelta(hours=48)
-    async with AsyncSessionLocal() as db:
-        await db.execute(delete(Item).where(Item.created_at < cutoff_date))
-        await db.commit()
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(delete(Item).where(Item.created_at < cutoff_date))
+            await db.commit()
+    except Exception as e:
+        logger.error(f"❌ Erreur lors du nettoyage DB : {e}")
 
 async def job_scan_market():
+    """🕵️‍♂️ Cœur du bot : Scanne chaque cible de manière isolée."""
     logger.info("🕵️‍♂️ Scan STRATÉGIQUE lancé...")
-    if not agent.page: await agent.start()
+    if not agent.browser: await agent.start()
 
-    async with AsyncSessionLocal() as db:
-        for target in TARGETS:
+    for target in TARGETS:
+        try:
             keyword = target["keyword"]
             max_buy = target["max_buy_price"]
             webhook = target.get("webhook")
             
             if not webhook or "METS_TON_LIEN" in webhook: continue
 
-            # Pause très courte pour scanner vite
-            await agent.random_sleep(1.0, 2.5)
+            # Pause humaine entre les recherches
+            await agent.random_sleep(1.0, 3.0)
             
             items_found = await agent.search(keyword, max_buy)
             
-            for item_data in items_found:
-                # 1. Filtre État
-                etat = str(item_data.get("condition", "")).lower().strip()
-                if not etat or etat not in CONDITIONS_ACCEPTEES: continue
+            async with AsyncSessionLocal() as db:
+                for item_data in items_found:
+                    # 1. Filtre État
+                    etat = str(item_data.get("condition", "")).lower().strip()
+                    if etat not in CONDITIONS_ACCEPTEES: continue
 
-                # 2. Check Marque (Souple)
-                # On vérifie juste que le mot clé est quelque part dans la marque
-                marque = str(item_data.get("brand", "")).lower()
-                kw = keyword.split(" ")[0].lower()
-                if kw not in marque and marque not in kw: 
-                    # Sécurité : Si la marque est inconnue, on laisse le bénéfice du doute
-                    if marque not in ["inconnu", "n/a", "", "voir photo"]:
+                    # 2. Filtre Anti-Spam / Concours
+                    title_lower = item_data['raw_title'].lower()
+                    if any(bad in title_lower for bad in BLACKLIST_KEYWORDS):
                         continue
 
-                # 🛑 3. FILTRE ANTI-CONCOURS & ANTI-RECHERCHE
-                title_lower = item_data['raw_title'].lower()
-                if any(bad_word in title_lower for bad_word in BLACKLIST_KEYWORDS):
-                    logger.info(f"🗑️ Ignoré (Spam/Concours) : {item_data['raw_title']}")
-                    continue
+                    # 3. Anti-Doublon
+                    res = await db.execute(select(Item).where(Item.vinted_id == item_data["vinted_id"]))
+                    if res.scalars().first(): continue
 
-                # 4. Anti-Doublon
-                res = await db.execute(select(Item).where(Item.vinted_id == item_data["vinted_id"]))
-                if res.scalars().first(): continue
+                    # 4. Enrichissement des données
+                    logger.info(f"🔎 Analyse du deal : {item_data['raw_title']} à {item_data['price']}€")
+                    
+                    item_data["real_details"] = await agent.get_real_details(item_data['url'])
+                    market_avg = await agent.analyze_market_price(item_data['raw_title'], item_data['vinted_id'])
+                    item_data["analysis"] = calculate_profit(item_data["price"], market_avg)
 
-                # ==========================================
-                # ⚡ MODE "INDICATIF"
-                # On essaie de calculer le profit, mais si ça échoue, ON ENVOIE QUAND MÊME
-                # ==========================================
-                logger.info(f"🔎 Trouvé : {item_data['raw_title']} à {item_data['price']}€")
-                
-                market_price = await agent.analyze_market_price(item_data['raw_title'], item_data['vinted_id'])
-                
-                # Si le scan marché échoue (0), on met une valeur par défaut pour l'affichage
-                if market_price == 0:
-                    market_price = 0 # Sera affiché comme "Non défini" sur Discord
-                
-                analysis = calculate_profit(item_data["price"], market_price)
-                
-                # On va chercher le vendeur
-                seller_stats = await agent.get_seller_stats(item_data['url'])
-                
-                item_data["seller"] = seller_stats
-                item_data["analysis"] = analysis
-                item_data["analysis"]["market_avg"] = market_price
+                    # 5. Sauvegarde
+                    new_item = Item(
+                        vinted_id=item_data["vinted_id"],
+                        title=item_data["raw_title"],
+                        price=item_data["price"],
+                        brand=item_data["brand"],
+                        size=item_data["size"],
+                        url=item_data["url"],
+                        photo_url=item_data.get("photo_url", ""),
+                        created_at=datetime.utcnow()
+                    )
+                    db.add(new_item)
+                    await db.commit()
+                    
+                    # 6. Alerte 🚀
+                    logger.success(f"✅ Alerte envoyée pour : {item_data['raw_title']}")
+                    await send_discord_alert(item_data, webhook_url=webhook)
+                    
+                    await asyncio.sleep(1) # Petit délai pour Discord
 
-                # Sauvegarde
-                new_item = Item(
-                    vinted_id=item_data["vinted_id"],
-                    title=item_data["raw_title"],
-                    price=item_data["price"],
-                    brand=item_data["brand"],
-                    size=item_data["size"],
-                    url=item_data["url"],
-                    photo_url=item_data.get("photo_url", ""),
-                    created_at=datetime.utcnow()
-                )
-                db.add(new_item)
-                
-                # ENVOI DIRECT 🚀
-                logger.success(f"✅ Alerte envoyée : {item_data['raw_title']}")
-                await send_discord_alert(item_data, webhook_url=webhook)
-                
-                await asyncio.sleep(1)
-
-            await db.commit()
+        except Exception as e:
+            logger.error(f"❌ Erreur lors du scan pour '{target.get('keyword')}': {e}")
+            continue
 
 async def start_scheduler():
+    """🚀 Initialise et démarre les tâches automatiques."""
     await agent.start()
-    scheduler.add_job(job_scan_market, 'interval', seconds=180)
-    scheduler.add_job(job_cleanup_db, 'interval', hours=24)
-    scheduler.start()
     
-    logger.info("🚀 Démarrage immédiat !")
+    # Scan toutes les 3 minutes (180s)
+    scheduler.add_job(job_scan_market, 'interval', seconds=180)
+    # Nettoyage DB toutes les 24h
+    scheduler.add_job(job_cleanup_db, 'interval', hours=24)
+    
+    scheduler.start()
+    logger.success("🚀 Monster Scheduler 2.0 en ligne !")
+    
+    # Lancement immédiat du premier scan
     asyncio.create_task(job_scan_market())
